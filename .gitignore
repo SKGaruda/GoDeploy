@@ -1,0 +1,20 @@
+# Private files
+*.pem
+*.key
+.env
+.env.*
+# Jenkins agent
+agent.jar
+# Floci backup
+*.tar
+# Generated binaries
+*.exe
+# Temporary files
+ssh-test.txt
+*.test
+coverage.out
+# IDE files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
