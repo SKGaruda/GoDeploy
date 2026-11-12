@@ -337,7 +337,7 @@ if [ -f "$PIDFILE" ]; then
         *)
             if kill -0 "$old_pid" 2>/dev/null; then
                 if [ -r "/proc/$old_pid/cmdline" ] &&
-                   tr '\000' ' ' < "/proc/$old_pid/cmdline" |
+                   tr '\\000' ' ' < "/proc/$old_pid/cmdline" |
                    grep -F "$BIN" >/dev/null; then
 
                     echo "Stopping previous OpsPulse process..."
