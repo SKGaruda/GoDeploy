@@ -9,6 +9,12 @@ pipeline {
         timestamps()
     }
 
+    environment {
+        EC2_HOST = '172.27.152.177'
+        EC2_PORT = '2201'
+        APP_PORT = '8080'
+    }
+
     stages {
 
         stage('Checkout') {
@@ -23,31 +29,27 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
-                    Write-Host "===== GO VERSION ====="
                     go version
                     if ($LASTEXITCODE -ne 0) {
-                        throw "Go is not available."
+                        throw "Go is unavailable."
                     }
 
-                    Write-Host "===== GIT VERSION ====="
                     git --version
                     if ($LASTEXITCODE -ne 0) {
-                        throw "Git is not available."
+                        throw "Git is unavailable."
                     }
 
-                    Write-Host "===== PODMAN VERSION ====="
                     podman --version
                     if ($LASTEXITCODE -ne 0) {
-                        throw "Podman is not available."
+                        throw "Podman is unavailable."
                     }
 
-                    Write-Host "===== PODMAN ENGINE ====="
                     podman info
                     if ($LASTEXITCODE -ne 0) {
-                        throw "Podman engine is not reachable."
+                        throw "Podman engine is unavailable."
                     }
 
-                    Write-Host "All required tools are available."
+                    Write-Host "All tools verified."
                 '''
             }
         }
@@ -65,12 +67,10 @@ pipeline {
                     )
 
                     if ($goFiles.Count -eq 0) {
-                        throw "No Go source files found."
+                        throw "No Go files found."
                     }
 
-                    Write-Host "Found $($goFiles.Count) Go files."
-
-                    Write-Host "Normalizing Go files to LF line endings..."
+                    Write-Host "Normalizing Go files to LF..."
 
                     foreach ($file in $goFiles) {
                         $content = [System.IO.File]::ReadAllText(
@@ -89,9 +89,11 @@ pipeline {
                     Write-Host "Running gofmt..."
 
                     $unformatted = @(
-                        & gofmt -l @($goFiles | ForEach-Object {
-                            $_.FullName
-                        })
+                        & gofmt -l @(
+                            $goFiles | ForEach-Object {
+                                $_.FullName
+                            }
+                        )
                     )
 
                     if ($LASTEXITCODE -ne 0) {
@@ -99,12 +101,12 @@ pipeline {
                     }
 
                     if ($unformatted.Count -gt 0) {
-                        Write-Host "Files requiring gofmt:"
+                        Write-Host "Files requiring formatting:"
                         $unformatted
                         throw "Go formatting check failed."
                     }
 
-                    Write-Host "All Go files are formatted successfully."
+                    Write-Host "All Go files are formatted."
                 '''
             }
         }
@@ -114,15 +116,13 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
-                    Write-Host "Running Go unit tests..."
-
                     go test -v ./...
 
                     if ($LASTEXITCODE -ne 0) {
                         throw "Go unit tests failed."
                     }
 
-                    Write-Host "All Go tests passed."
+                    Write-Host "All tests passed."
                 '''
             }
         }
@@ -132,15 +132,13 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
-                    Write-Host "Running go vet..."
-
                     go vet ./...
 
                     if ($LASTEXITCODE -ne 0) {
                         throw "Go static analysis failed."
                     }
 
-                    Write-Host "Go vet completed successfully."
+                    Write-Host "Go vet passed."
                 '''
             }
         }
@@ -153,8 +151,6 @@ pipeline {
                     New-Item -ItemType Directory -Force -Path .\\dist |
                         Out-Null
 
-                    Write-Host "Building GoDeploy CLI..."
-
                     go build -trimpath `
                         -o .\\dist\\godeploy.exe `
                         .\\cmd\\godeploy
@@ -164,13 +160,11 @@ pipeline {
                     }
 
                     if (-not (Test-Path .\\dist\\godeploy.exe)) {
-                        throw "GoDeploy executable was not generated."
+                        throw "GoDeploy executable missing."
                     }
 
                     Get-Item .\\dist\\godeploy.exe |
                         Select-Object Name, Length
-
-                    Write-Host "GoDeploy CLI build successful."
                 '''
             }
         }
@@ -179,8 +173,6 @@ pipeline {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
-
-                    Write-Host "Building OpsPulse for Linux AMD64..."
 
                     $previousGOOS = $env:GOOS
                     $previousGOARCH = $env:GOARCH
@@ -207,29 +199,249 @@ pipeline {
                     }
 
                     if (-not (Test-Path .\\dist\\opspulse-linux-amd64)) {
-                        throw "OpsPulse Linux binary was not generated."
+                        throw "Linux binary missing."
                     }
 
                     Get-Item .\\dist\\opspulse-linux-amd64 |
                         Select-Object Name, Length
 
-                    Write-Host "OpsPulse Linux build successful."
+                    Write-Host "Linux binary built successfully."
                 '''
+            }
+        }
+
+        stage('Deploy OpsPulse to Floci EC2') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'floci-ec2-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    powershell '''
+                        $ErrorActionPreference = "Stop"
+
+                        Write-Host "===== PREPARE DEPLOYMENT ====="
+
+                        if (-not (Test-Path .\\dist\\opspulse-linux-amd64)) {
+                            throw "OpsPulse Linux binary not found."
+                        }
+
+                        Write-Host "===== SECURE SSH KEY PERMISSIONS ====="
+
+                        $who = & whoami.exe /user /fo csv /nh
+                        $identity = ($who -join '') |
+                            ConvertFrom-Csv -Header Account,SID
+
+                        $agentSid = $identity.SID
+
+                        if (-not $agentSid) {
+                            throw "Could not identify Jenkins agent SID."
+                        }
+
+                        & icacls.exe $env:SSH_KEY /inheritance:r |
+                            Out-Host
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Could not remove inherited key permissions."
+                        }
+
+                        & icacls.exe $env:SSH_KEY /remove:g `
+                            "*S-1-1-0" `
+                            "*S-1-5-11" `
+                            "*S-1-5-32-545" |
+                            Out-Host
+
+                        & icacls.exe $env:SSH_KEY /grant:r "*${agentSid}:(R)" |
+                            Out-Host
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Could not set SSH key permissions."
+                        }
+
+                        Write-Host "===== VALIDATE SSH PRIVATE KEY ====="
+
+                        $null = & ssh-keygen.exe -y -f $env:SSH_KEY 2>&1
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "SSH private key validation failed."
+                        }
+
+                        Write-Host "SSH private key validation successful."
+
+                        Write-Host "===== PREPARE SSH HOST KEY ====="
+
+                        $knownHosts = Join-Path $env:WORKSPACE "floci_known_hosts"
+
+                        $scanLines = @(
+                            & ssh-keyscan.exe -T 5 -p $env:EC2_PORT $env:EC2_HOST 2>$null
+                        )
+
+                        if ($LASTEXITCODE -ne 0 -or $scanLines.Count -eq 0) {
+                            throw "Could not retrieve EC2 SSH host key."
+                        }
+
+                        [System.IO.File]::WriteAllLines(
+                            $knownHosts,
+                            [string[]]$scanLines,
+                            [System.Text.Encoding]::ASCII
+                        )
+
+                        Write-Host "EC2 SSH host key collected."
+
+                        Write-Host "===== TRANSFER OPSPULSE BINARY ====="
+
+                        & scp.exe `
+                            -i $env:SSH_KEY `
+                            -P $env:EC2_PORT `
+                            -o BatchMode=yes `
+                            -o StrictHostKeyChecking=yes `
+                            -o "UserKnownHostsFile=$knownHosts" `
+                            -o IdentitiesOnly=yes `
+                            .\\dist\\opspulse-linux-amd64 `
+                            "$($env:SSH_USER)@$($env:EC2_HOST):/tmp/opspulse-linux-amd64.new"
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "SCP transfer failed."
+                        }
+
+                        Write-Host "Binary transferred successfully."
+
+                        Write-Host "===== DEPLOY ON EC2 ====="
+
+                        $remoteScript = @'
+set -eu
+
+APP_DIR="/opt/opspulse"
+BIN="$APP_DIR/opspulse"
+PIDFILE="$APP_DIR/opspulse.pid"
+LOGFILE="$APP_DIR/opspulse.log"
+UPLOAD="/tmp/opspulse-linux-amd64.new"
+
+mkdir -p "$APP_DIR"
+
+if [ ! -f "$UPLOAD" ]; then
+    echo "Uploaded binary not found."
+    exit 1
+fi
+
+echo "Checking previous OpsPulse process..."
+
+if [ -f "$PIDFILE" ]; then
+    old_pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+
+    case "$old_pid" in
+        ''|*[!0-9]*)
+            ;;
+        *)
+            if kill -0 "$old_pid" 2>/dev/null; then
+                if [ -r "/proc/$old_pid/cmdline" ] &&
+                   tr '\000' ' ' < "/proc/$old_pid/cmdline" |
+                   grep -F "$BIN" >/dev/null; then
+
+                    echo "Stopping previous OpsPulse process..."
+                    kill "$old_pid"
+
+                    count=0
+                    while kill -0 "$old_pid" 2>/dev/null; do
+                        count=$((count + 1))
+                        if [ "$count" -ge 10 ]; then
+                            echo "Previous process did not stop."
+                            exit 1
+                        fi
+                        sleep 1
+                    done
+                fi
+            fi
+            ;;
+    esac
+fi
+
+echo "Installing new OpsPulse binary..."
+
+cp "$UPLOAD" "$BIN"
+chmod 755 "$BIN"
+rm -f "$UPLOAD"
+
+echo "Starting OpsPulse..."
+
+nohup env \
+    APP_NAME=OpsPulse \
+    APP_VERSION=1.0.0 \
+    APP_ENV=production \
+    APP_PORT=8080 \
+    "$BIN" > "$LOGFILE" 2>&1 &
+
+new_pid=$!
+echo "$new_pid" > "$PIDFILE"
+
+echo "OpsPulse PID: $new_pid"
+
+echo "Waiting for application health..."
+
+count=0
+
+while [ "$count" -lt 15 ]; do
+    if ! kill -0 "$new_pid" 2>/dev/null; then
+        echo "OpsPulse process exited."
+        cat "$LOGFILE"
+        exit 1
+    fi
+
+    if wget -q -O - http://127.0.0.1:8080/health; then
+        echo ""
+        echo "OpsPulse health check successful."
+        exit 0
+    fi
+
+    count=$((count + 1))
+    sleep 2
+done
+
+echo "OpsPulse health check failed."
+cat "$LOGFILE"
+exit 1
+'@
+
+                        $encodedScript = [Convert]::ToBase64String(
+                            [System.Text.Encoding]::UTF8.GetBytes($remoteScript)
+                        )
+
+                        $remoteCommand = "echo $encodedScript | base64 -d | sh"
+
+                        & ssh.exe `
+                            -i $env:SSH_KEY `
+                            -p $env:EC2_PORT `
+                            -o BatchMode=yes `
+                            -o StrictHostKeyChecking=yes `
+                            -o "UserKnownHostsFile=$knownHosts" `
+                            -o IdentitiesOnly=yes `
+                            "$($env:SSH_USER)@$($env:EC2_HOST)" `
+                            $remoteCommand
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Remote EC2 deployment or health check failed."
+                        }
+
+                        Write-Host "===== DEPLOYMENT SUCCESSFUL ====="
+                    '''
+                }
             }
         }
     }
 
     post {
         success {
-            echo 'SUCCESS: GoDeploy CI pipeline completed successfully.'
+            echo 'SUCCESS: GoDeploy CI/CD pipeline completed.'
         }
 
         failure {
-            echo 'FAILURE: GoDeploy CI pipeline failed. Check the stage logs.'
+            echo 'FAILURE: GoDeploy pipeline failed. Check Console Output.'
         }
 
         always {
-            echo 'GoDeploy CI pipeline execution finished.'
+            echo 'GoDeploy pipeline execution finished.'
         }
     }
 }
