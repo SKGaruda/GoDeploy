@@ -285,7 +285,7 @@ pipeline {
                             $scanOutput |
                             ForEach-Object { "$_".Trim() } |
                             Where-Object {
-                                $_ -match '^[^\s#]+\s+ssh-(rsa|ed25519|ecdsa)'
+                                $_ -match '^[^\\s#]+\\s+ssh-(rsa|ed25519|ecdsa)'
                             }
                         )
 
