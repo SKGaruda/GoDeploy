@@ -274,12 +274,23 @@ pipeline {
 
                         $knownHosts = Join-Path $env:WORKSPACE "floci_known_hosts"
 
+                        # Run ssh-keyscan through CMD so PowerShell
+                        # does not interpret native stderr as an error.
+
+                        $scanOutput = & cmd.exe /d /c "ssh-keyscan.exe -T 5 -p $env:EC2_PORT $env:EC2_HOST 2>NUL"
+
+                        $scanExitCode = $LASTEXITCODE
+
                         $scanLines = @(
-                            & ssh-keyscan.exe -T 5 -p $env:EC2_PORT $env:EC2_HOST 2>$null
+                            $scanOutput |
+                            ForEach-Object { "$_".Trim() } |
+                            Where-Object {
+                                $_ -match '^[^\s#]+\s+ssh-(rsa|ed25519|ecdsa)'
+                            }
                         )
 
-                        if ($LASTEXITCODE -ne 0 -or $scanLines.Count -eq 0) {
-                            throw "Could not retrieve EC2 SSH host key."
+                        if ($scanExitCode -ne 0 -or $scanLines.Count -eq 0) {
+                            throw "Could not retrieve EC2 SSH host key. Exit code: $scanExitCode"
                         }
 
                         [System.IO.File]::WriteAllLines(
@@ -288,7 +299,7 @@ pipeline {
                             [System.Text.Encoding]::ASCII
                         )
 
-                        Write-Host "EC2 SSH host key collected."
+                        Write-Host "SSH host key collected successfully."
 
                         Write-Host "===== TRANSFER OPSPULSE BINARY ====="
 
