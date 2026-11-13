@@ -270,36 +270,25 @@ pipeline {
 
                         Write-Host "SSH private key validation successful."
 
-                        Write-Host "===== PREPARE SSH HOST KEY ====="
+                        Write-Host "===== CONFIGURE VERIFIED SSH HOST KEY ====="
 
                         $knownHosts = Join-Path $env:WORKSPACE "floci_known_hosts"
 
-                        # Run ssh-keyscan through CMD so PowerShell
-                        # does not interpret native stderr as an error.
+                        $hostKey = "[172.27.152.177]:2201 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMUecn4BNx4oLRXFSY8kVnDnwG1zRlIaw6zM+fAR2Jj7"
 
-                        $scanOutput = & cmd.exe /d /c "ssh-keyscan.exe -T 5 -p $env:EC2_PORT $env:EC2_HOST 2>NUL"
-
-                        $scanExitCode = $LASTEXITCODE
-
-                        $scanLines = @(
-                            $scanOutput |
-                            ForEach-Object { "$_".Trim() } |
-                            Where-Object {
-                                $_ -match '^[^\\s#]+\\s+ssh-(rsa|ed25519|ecdsa)'
-                            }
-                        )
-
-                        if ($scanExitCode -ne 0 -or $scanLines.Count -eq 0) {
-                            throw "Could not retrieve EC2 SSH host key. Exit code: $scanExitCode"
-                        }
-
-                        [System.IO.File]::WriteAllLines(
+                        [System.IO.File]::WriteAllText(
                             $knownHosts,
-                            [string[]]$scanLines,
+                            $hostKey + [Environment]::NewLine,
                             [System.Text.Encoding]::ASCII
                         )
 
-                        Write-Host "SSH host key collected successfully."
+                        $null = & ssh-keygen.exe -lf $knownHosts 2>&1
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Could not validate pinned SSH host key."
+                        }
+
+                        Write-Host "Verified ED25519 host key configured."
 
                         Write-Host "===== TRANSFER OPSPULSE BINARY ====="
 
