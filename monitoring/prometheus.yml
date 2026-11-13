@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "opspulse"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["10.88.0.22:8080"]
